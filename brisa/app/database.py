@@ -1,4 +1,5 @@
 import logging
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -6,6 +7,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path("/data/history.db")
+
+_HWMON_ID_RE = re.compile(r'^([a-zA-Z0-9_]+)-hwmon\d+/(.+)$')
+
+
+def _normalize_sensor_id(sensor_id: str) -> str:
+    """Removes the volatile hwmon index from sensor IDs for consistent history storage/querying."""
+    return _HWMON_ID_RE.sub(r'\1/\2', sensor_id)
 
 
 def _connect() -> sqlite3.Connection:
@@ -26,10 +34,10 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS fan_readings (
-                ts         INTEGER NOT NULL,
-                fan_id     TEXT NOT NULL,
-                percent    INTEGER NOT NULL,
-                rpm        REAL
+                ts        INTEGER NOT NULL,
+                fan_id    TEXT NOT NULL,
+                percent   INTEGER NOT NULL,
+                rpm       REAL
             );
 
             CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings(ts);
@@ -39,10 +47,12 @@ def init_db() -> None:
 
 
 def write_reading(ts: int, sensor_id: str, temp: float) -> None:
+    # Optional: Normalize ID to prevent fragmented entries across reboots
+    normalized_id = _normalize_sensor_id(sensor_id)
     with _connect() as conn:
         conn.execute(
             "INSERT INTO readings (ts, sensor_id, temp) VALUES (?, ?, ?)",
-            (ts, sensor_id, temp),
+            (ts, normalized_id, temp),
         )
 
 

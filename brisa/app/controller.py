@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import re
 import time
 
-from app.database import write_reading, write_fan_reading, prune_old_rows
-from app.sensors import detect_sensors
-from app.liquidctl_wrapper import set_fan_speed as liquidctl_set_speed, get_fan_status
 from app import hwmon_pwm
+from app.database import prune_old_rows, write_fan_reading, write_reading
+from app.liquidctl_wrapper import get_fan_status
+from app.liquidctl_wrapper import set_fan_speed as liquidctl_set_speed
+from app.sensors import detect_sensors
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,31 @@ _last_applied: dict[str, int] = {}
 
 # Track which hwmon-pwm fans have been taken over in this session
 _pwm_taken_over: set[str] = set()
+
+_HWMON_ID_RE = re.compile(r'^([a-zA-Z0-9_]+)-hwmon\d+/(.+)$')
+
+
+def _normalize_hwmon_id(sensor_id: str) -> str:
+    """Removes the volatile hwmon index from sensor IDs for comparison (e.g. nct6798-hwmon10/SYSTIN -> nct6798/SYSTIN)."""
+    return _HWMON_ID_RE.sub(r'\1/\2', sensor_id)
+
+
+def get_sensor_temp(sensor_id: str, sensor_map: dict[str, float]) -> float | None:
+    """
+    Fetches temperature for sensor_id. Falls back to normalized hwmon match
+    if exact match is not found.
+    """
+    # 1. Exact match
+    if sensor_id in sensor_map:
+        return sensor_map[sensor_id]
+
+    # 2. Tolerant match (ignoring hwmon index)
+    target_norm = _normalize_hwmon_id(sensor_id)
+    for sid, temp in sensor_map.items():
+        if _normalize_hwmon_id(sid) == target_norm:
+            return temp
+
+    return None
 
 
 def interpolate(points: list[dict], temp: float) -> int:
@@ -38,16 +65,13 @@ def resolve_virtual_sensors(
 ) -> dict[str, float]:
     """
     Compute virtual sensor temperatures from real sensor readings.
-
-    Returns a dict of virtual_sensor_id -> computed_temp.
-    Uses whichever source sensors are available. Only skips if ALL sources are missing.
     """
     results: dict[str, float] = {}
 
     for vs in virtual_sensors:
         temps = []
         for src_id in vs.source_sensor_ids:
-            temp = real_sensor_map.get(src_id)
+            temp = get_sensor_temp(src_id, real_sensor_map)
             if temp is None:
                 logger.debug(
                     "Virtual sensor '%s': source sensor '%s' not found, ignoring",
@@ -79,11 +103,7 @@ def resolve_virtual_sensors(
 
 
 def _ensure_pwm_takeover(fan_id: str) -> bool:
-    """
-    Ensure a hwmon-pwm fan has been taken over (manual mode enabled).
-    Only performs the takeover once per session per fan.
-    Returns True if the fan is ready for control.
-    """
+    """Ensure a hwmon-pwm fan has been taken over."""
     if fan_id in _pwm_taken_over:
         return True
     if hwmon_pwm.takeover(fan_id):
@@ -103,13 +123,9 @@ def _apply_fan_speed(fan_id: str, backend: str, percent: int) -> None:
 
 
 def _get_rpm_map(config) -> dict[str, float]:
-    """
-    Collect RPM readings from all backends.
-    Returns a merged dict of fan_id -> current_rpm.
-    """
+    """Collect RPM readings from all backends."""
     rpm_map: dict[str, float] = {}
 
-    # liquidctl RPMs (if any liquidctl fans are configured)
     has_liquidctl = any(fc.backend == "liquidctl" for fc in config.fan_configs)
     if has_liquidctl:
         try:
@@ -119,7 +135,6 @@ def _get_rpm_map(config) -> dict[str, float]:
         except RuntimeError as e:
             logger.warning("Could not fetch liquidctl fan RPMs: %s", e)
 
-    # hwmon-pwm RPMs
     for fc in config.fan_configs:
         if fc.backend == "hwmon-pwm":
             rpm = hwmon_pwm.get_fan_rpm(fc.fan_id)
@@ -144,7 +159,7 @@ async def run_once(config) -> None:
     sensor_temps: dict[str, float] = {}
 
     for fan_cfg in config.fan_configs:
-        # Manual override — skip sensor read and curve entirely
+        # Manual override
         if fan_cfg.override_percent is not None:
             percent = fan_cfg.override_percent
             logger.debug("Fan '%s': manual override at %d%%", fan_cfg.fan_id, percent)
@@ -155,7 +170,7 @@ async def run_once(config) -> None:
                                fan_cfg.fan_id, fan_cfg.curve_name)
                 percent = config.settings.safety_floor_percent
             else:
-                temp = sensor_map.get(fan_cfg.sensor_id)
+                temp = get_sensor_temp(fan_cfg.sensor_id, sensor_map)
                 if temp is None:
                     logger.warning("Fan '%s': sensor '%s' not found, applying safety floor",
                                    fan_cfg.fan_id, fan_cfg.sensor_id)
@@ -186,8 +201,8 @@ async def run_once(config) -> None:
 
 
 async def loop() -> None:
-    from app.main import get_config
     from app.liquidctl_wrapper import initialize
+    from app.main import get_config
 
     logger.info("Controller loop starting")
 

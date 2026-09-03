@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import subprocess
+from .hwmon_pwm import _stable_device_id
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +252,12 @@ def detect_sensors() -> list[dict]:
             else:
                 label_raw = _read_file(os.path.join(device_path, f"temp{n}_label"))
                 label = label_raw if label_raw else f"temp{n}"
-                sensor_id = f"{driver}-{hwmon_dir}/{label}"
+                
+                # Versuche eine stabile ID (z.B. nct6775.656) zu nutzen, sonst Fallback auf hwmon_dir
+                stable_id = _stable_device_id(hwmon_full)
+                device_identifier = stable_id if stable_id else hwmon_dir
+                
+                sensor_id = f"{driver}-{device_identifier}/{label}"
 
             sensors.append({
                 "id": sensor_id,
@@ -273,10 +279,27 @@ def detect_sensors() -> list[dict]:
 def read_temp(sensor_id: str) -> float:
     """
     Read current temperature for a given sensor_id.
+    Supports exact matches as well as fuzzy fallback matching across hwmon reboots.
     Raises ValueError if sensor_id is not found.
     """
     sensors = detect_sensors()
+
+    # 1. Exakter Match
     for sensor in sensors:
         if sensor["id"] == sensor_id:
             return sensor["current_temp"]
+
+    # 2. Toleranter Fallback-Match: Entfernt '-hwmon10', '-hwmon12' etc. beim Vergleich
+    # Wandelt "nct6798-hwmon10/SYSTIN" -> "nct6798/SYSTIN"
+    clean_target = re.sub(r'-hwmon\d+', '', sensor_id)
+    
+    for sensor in sensors:
+        clean_sensor_id = re.sub(r'-hwmon\d+', '', sensor["id"])
+        if clean_sensor_id == clean_target:
+            logger.warning(
+                "Resolved sensor '%s' via fallback match to current ID '%s'",
+                sensor_id, sensor["id"]
+            )
+            return sensor["current_temp"]
+
     raise ValueError(f"Sensor not found: {sensor_id!r}")

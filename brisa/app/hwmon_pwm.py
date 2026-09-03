@@ -55,6 +55,35 @@ def _stable_device_id(hwmon_path: str) -> str | None:
     return None
 
 
+def resolve_hwmon_dir(target_id: str) -> str | None:
+    """
+    Finds the current hwmon directory (e.g. 'hwmon12') for a given target device ID
+    or driver/chip name (e.g. 'nct6687.2592' or 'nct6798').
+    """
+    try:
+        hwmon_dirs = os.listdir(HWMON_PATH)
+    except OSError:
+        return None
+
+    # Clean potential hwmon suffixes like '-hwmon10' from input string
+    clean_target = re.sub(r'-hwmon\d+', '', target_id)
+
+    for hwmon_dir in hwmon_dirs:
+        hwmon_full = os.path.join(HWMON_PATH, hwmon_dir)
+        
+        # 1. Match against stable platform device ID (e.g. nct6775.656)
+        stable_id = _stable_device_id(hwmon_full)
+        if stable_id and (stable_id == target_id or stable_id == clean_target):
+            return hwmon_dir
+
+        # 2. Match against driver name (e.g. nct6798)
+        driver = _read_file(os.path.join(hwmon_full, "name"))
+        if driver and (driver == target_id or driver == clean_target):
+            return hwmon_dir
+
+    return None
+
+
 def detect_pwm_fans() -> list[dict]:
     """
     Scan /sys/class/hwmon for controllable PWM fan channels.
@@ -159,14 +188,9 @@ def detect_pwm_fans() -> list[dict]:
 
 def _resolve_paths(fan_id: str) -> dict | None:
     """
-    Resolve a stable fan_id back to current sysfs paths.
-
-    Since hwmonN numbers can change, we scan all hwmon dirs to find
-    the one matching the stable device ID in the fan_id.
-
-    Returns dict with pwm_path, enable_path, rpm_path or None if not found.
+    Resolve a fan_id (stable or legacy) back to current sysfs paths.
     """
-    # Parse fan_id: "hwmon-pwm-nct6687.2592/pwm1"
+    # Parse fan_id: "hwmon-pwm-nct6687.2592/pwm1" or "hwmon-pwm-nct6798-hwmon10/pwm1"
     match = re.match(r'^hwmon-pwm-([^/]+)/(pwm\d+)$', fan_id)
     if not match:
         logger.error("Invalid hwmon-pwm fan_id format: %s", fan_id)
@@ -176,25 +200,24 @@ def _resolve_paths(fan_id: str) -> dict | None:
     pwm_name = match.group(2)
     n = pwm_name[3:]
 
-    try:
-        hwmon_dirs = os.listdir(HWMON_PATH)
-    except OSError:
+    # Resolve hwmon directory dynamically
+    hwmon_dir = resolve_hwmon_dir(target_device_id)
+    if not hwmon_dir:
+        logger.error("Cannot resolve fan_id '%s': device not found", fan_id)
         return None
 
-    for hwmon_dir in hwmon_dirs:
-        hwmon_full = os.path.join(HWMON_PATH, hwmon_dir)
-        stable_id = _stable_device_id(hwmon_full)
-        if stable_id == target_device_id:
-            pwm_path = os.path.join(hwmon_full, pwm_name)
-            if os.path.exists(pwm_path):
-                rpm_path = os.path.join(hwmon_full, f"fan{n}_input")
-                return {
-                    "pwm_path": pwm_path,
-                    "enable_path": f"{pwm_path}_enable",
-                    "rpm_path": rpm_path if os.path.exists(rpm_path) else None,
-                }
+    hwmon_full = os.path.join(HWMON_PATH, hwmon_dir)
+    pwm_path = os.path.join(hwmon_full, pwm_name)
 
-    logger.error("Cannot resolve fan_id '%s': device not found", fan_id)
+    if os.path.exists(pwm_path):
+        rpm_path = os.path.join(hwmon_full, f"fan{n}_input")
+        return {
+            "pwm_path": pwm_path,
+            "enable_path": f"{pwm_path}_enable",
+            "rpm_path": rpm_path if os.path.exists(rpm_path) else None,
+        }
+
+    logger.error("PWM path '%s' does not exist for fan_id '%s'", pwm_path, fan_id)
     return None
 
 

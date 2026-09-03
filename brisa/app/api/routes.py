@@ -100,7 +100,6 @@ async def get_state():
         }
 
     # Build grouped output
-    # Track which items are in groups so we can find ungrouped ones
     grouped_sensor_ids = set()
     grouped_fan_ids = set()
 
@@ -171,8 +170,6 @@ async def post_config(new_config: AppConfig):
         logger.error("POST /config: sensor detection failed: %s", e)
         raise HTTPException(status_code=503, detail=f"Could not detect sensors for validation: {e}")
 
-    known_sensor_ids = [s["id"] for s in sensors]
-
     known_fan_ids = []
     try:
         fans = get_fan_status()
@@ -187,12 +184,13 @@ async def post_config(new_config: AppConfig):
     except Exception as e:
         logger.warning("POST /config: hwmon-pwm detection failed: %s", e)
 
-    errors = validate_config(new_config, known_sensor_ids, known_fan_ids)
+    # Pass full sensor dicts to validate_config instead of just string IDs
+    errors = validate_config(new_config, sensors, known_fan_ids)
     if errors:
         logger.warning("POST /config: validation failed with %d error(s):", len(errors))
         for err in errors:
             logger.warning("  - %s", err)
-        logger.warning("POST /config: known sensor IDs: %s", known_sensor_ids)
+        logger.warning("POST /config: detected sensors: %s", [s["id"] for s in sensors])
         logger.warning("POST /config: known fan IDs: %s", known_fan_ids)
         raise HTTPException(status_code=422, detail=errors)
 
