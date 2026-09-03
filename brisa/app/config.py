@@ -182,7 +182,7 @@ def validate_config(config: AppConfig, known_sensor_ids: list[str], known_fan_id
     curve_names = {c.name for c in config.curves}
 
     virtual_sensor_ids = {vs.id for vs in config.virtual_sensors}
-    known_sensors_set = set(known_sensor_ids)
+    known_sensors_set = {s["id"] if isinstance(s, dict) else s for s in known_sensor_ids}
     all_sensor_ids = known_sensors_set | virtual_sensor_ids
 
     # Validate virtual sensors
